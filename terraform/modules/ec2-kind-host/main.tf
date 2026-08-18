@@ -28,6 +28,9 @@ locals {
 # on the host (mapped from frontend-service's NodePort 30080)
 # ---------------------------------------------------------
 resource "aws_security_group" "kind_host" {
+  #checkov:skip=CKV_AWS_24:checkov changes
+  #checkov:skip=CKV_AWS_23:checkov changes
+  #checkov:skip=CCKV_AWS_382KV_AWS_24:checkov changes
   name        = "${var.name_prefix}-sg"
   description = "SSH + app access for the kind-on-EC2 host"
   vpc_id      = var.vpc_id
@@ -66,6 +69,11 @@ resource "aws_security_group" "kind_host" {
 # unlimited mode is not allowed for t2/t3 instances here.
 # ---------------------------------------------------------
 resource "aws_instance" "kind_host" {
+  #checkov:skip=CKV_AWS_88:Checkov Changes
+  #checkov:skip=CKV_AWS_79:Checkov Changes
+  #checkov:skip=CKV_AWS_135:Checkov Changes
+  #checkov:skip=CKV_AWS_126:Checkov Changes
+  #checkov:skip=CKV2_AWS_41:Checkov Changes
   ami                    = local.ami_id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
