@@ -181,6 +181,9 @@ jobs:
           echo "KIND CLUSTER"
           echo "======================================"
 
+          kind export kubeconfig --name rajesh-kind
+          kubectl config use-context kind-rajesh-kind
+
           kind get clusters
           kubectl config current-context
           kubectl get nodes
