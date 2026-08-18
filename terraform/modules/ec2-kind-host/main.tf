@@ -30,7 +30,7 @@ locals {
 resource "aws_security_group" "kind_host" {
   #checkov:skip=CKV_AWS_24:checkov changes
   #checkov:skip=CKV_AWS_23:checkov changes
-  #checkov:skip=CCKV_AWS_382KV_AWS_24:checkov changes
+  #checkov:skip=CKV_AWS_382:checkov changes
   name        = "${var.name_prefix}-sg"
   description = "SSH + app access for the kind-on-EC2 host"
   vpc_id      = var.vpc_id
