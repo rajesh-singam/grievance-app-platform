@@ -1,0 +1,96 @@
+
+namespace: rajeshapp
+
+image:
+  registry: rajeshapp         
+  pullPolicy: IfNotPresent
+  tag: v1
+
+config:
+  flaskEnv: production
+  jwtExpiryHours: "24"
+  gunicornWorkers: "3"
+  gunicornTimeout: "30"
+
+secrets:
+  secretKey: "7e49f6592f22d8803d368662e00847470ad0872db46ba38995c3174ef6e12d9b"
+  jwtSecret: "qOWxtcRaRDssI6cKX1ahv06U6wO144G0sjzZ6zDLIiAIaf3ooTeSqHk/ssabbkOp"
+  mongoUser: "root"
+  mongoPassword: "example"
+
+mongo:
+  image: "mongo:7.0"
+  storage: 10Gi
+  storageClassName: ""     
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+services:
+  auth-service:
+    port: 5001
+    mongoDb: auth_db
+    replicas: 2
+    serviceType: ClusterIP
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 256Mi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilization: 70
+
+  grievance-service:
+    port: 5002
+    mongoDb: grievance_db
+    replicas: 2
+    serviceType: ClusterIP
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 256Mi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilization: 70
+
+  audit-service:
+    port: 5003
+    mongoDb: audit_db
+    replicas: 1
+    serviceType: ClusterIP
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 256Mi }
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilization: 70
+
+  frontend-service:
+    port: 5000
+    mongoDb: ""              
+    replicas: 2
+    serviceType: NodePort
+    nodePort: 30080
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 256Mi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilization: 70
+
+ingress:
+  enabled: false            
+  className: nginx
+  host: rajeshapp.local
+  tls:
+    enabled: false
+    secretName: rajeshapp-tls
+
+networkPolicies:
+  enabled: true
