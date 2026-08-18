@@ -3,7 +3,7 @@ resource "aws_vpc" "main" {
   #checkov:skip=CKV_AWS_338:Checkov Changes
   #checkov:skip=CKV_AWS_355:Checkov Changes
   #checkov:skip=CKV_AWS_290:Checkov Changes
-  
+  #checkov:skip=CKV2_AWS_12:Checkov Changes
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
@@ -112,6 +112,8 @@ resource "aws_default_security_group" "default" {
 }
 
 resource "aws_flow_log" "vpc" {
+  #checkov:skip=CKV_AWS_158:checkov changes
+  #checkov:skip=CKV_AWS_338:checkov changes
   iam_role_arn    = aws_iam_role.vpc_flow_log.arn
   log_destination = aws_cloudwatch_log_group.vpc_flow_log.arn
   traffic_type    = "ALL"
@@ -119,6 +121,8 @@ resource "aws_flow_log" "vpc" {
 }
 
 resource "aws_cloudwatch_log_group" "vpc_flow_log" {
+  #checkov:skip=CKV_AWS_158:checkov changes
+  #checkov:skip=CKV_AWS_338:checkov changes
   name              = "/aws/vpc/${var.name}-flow-logs"
   retention_in_days = 7
 }

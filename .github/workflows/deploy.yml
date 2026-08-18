@@ -1,0 +1,302 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - Infrastructure
+    types:
+      - completed
+    branches:
+      - main
+      - master
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Docker image tag to deploy
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: Deploy to EC2 Kind
+    runs-on: ubuntu-latest
+    environment: production
+
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+
+      - name: Resolve image tag
+        id: resolve
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get EC2 public IP
+        id: ec2
+        shell: bash
+        run: |
+          set -e
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:Name,Values=rajesh-grievanceapp-prod-kind" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text)
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "No running EC2 instance found"
+            exit 1
+          fi
+
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text)
+
+          if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
+            echo "EC2 instance has no public IP"
+            exit 1
+          fi
+
+          echo "public_ip=$PUBLIC_IP" >> "$GITHUB_OUTPUT"
+
+          echo "Instance: $INSTANCE_ID"
+          echo "Public IP: $PUBLIC_IP"
+
+      - name: Setup SSH key
+        run: |
+          set -e
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/ec2_key.pem
+          chmod 600 /tmp/ec2_key.pem
+
+      - name: Prepare EC2
+        run: |
+          ssh \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i /tmp/ec2_key.pem \
+            ubuntu@${{ steps.ec2.outputs.public_ip }} << 'EOF'
+          set -e
+
+          echo "Preparing EC2"
+
+          sudo mkdir -p /opt/rajesh-grievanceapp
+          sudo chown -R ubuntu:ubuntu /opt/rajesh-grievanceapp
+
+          echo "Docker:"
+          docker --version
+
+          echo "Kind:"
+          kind --version
+
+          echo "Kubectl:"
+          kubectl version --client
+
+          echo "Helm:"
+          helm version
+
+          echo "EC2 ready"
+          EOF
+
+      - name: Copy Helm chart
+        run: |
+          set -e
+
+          scp \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i /tmp/ec2_key.pem \
+            -r ./helm/rajeshapp \
+            ubuntu@${{ steps.ec2.outputs.public_ip }}:/opt/rajesh-grievanceapp/
+
+      - name: Deploy to EC2 Kind
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SSH_HOST: ${{ steps.ec2.outputs.public_ip }}
+          DEPLOY_IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+        run: |
+          set -e
+
+          ssh \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i /tmp/ec2_key.pem \
+            ubuntu@$SSH_HOST \
+            "DOCKER_USER='$DOCKER_USER' DOCKER_TOKEN='$DOCKER_TOKEN' IMAGE_TAG='$DEPLOY_IMAGE_TAG' bash -s" << 'REMOTE_SCRIPT'
+
+          set -e
+
+          echo "======================================"
+          echo "DEPLOYMENT"
+          echo "======================================"
+          echo "Docker user: $DOCKER_USER"
+          echo "Image tag: $IMAGE_TAG"
+
+          if ! kind get clusters | grep -q "^rajesh-kind$"; then
+            echo "Creating Kind cluster"
+
+            cat > /tmp/kind-config.yaml << 'KIND_CONFIG'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 30080
+                  hostPort: 30080
+                  protocol: TCP
+          KIND_CONFIG
+
+            kind create cluster \
+              --name rajesh-kind \
+              --config /tmp/kind-config.yaml
+          else
+            echo "Kind cluster already exists"
+          fi
+
+          echo "======================================"
+          echo "KIND CLUSTER"
+          echo "======================================"
+
+          kind get clusters
+          kubectl config current-context
+          kubectl get nodes
+
+          echo "======================================"
+          echo "DOCKER HUB LOGIN"
+          echo "======================================"
+
+          echo "$DOCKER_TOKEN" | docker login \
+            -u "$DOCKER_USER" \
+            --password-stdin
+
+          echo "======================================"
+          echo "PULLING IMAGES"
+          echo "======================================"
+
+          for svc in auth-service grievance-service audit-service frontend-service
+          do
+            echo "Pulling $svc"
+
+            docker pull "$DOCKER_USER/$svc:$IMAGE_TAG"
+
+            kind load docker-image \
+              "$DOCKER_USER/$svc:$IMAGE_TAG" \
+              --name rajesh-kind
+          done
+
+          echo "======================================"
+          echo "HELM DEPLOYMENT"
+          echo "======================================"
+
+          cd /opt/rajesh-grievanceapp
+
+          helm upgrade --install rajeshapp \
+            ./rajeshapp \
+            --namespace rajesh \
+            --create-namespace \
+            --set image.registry="$DOCKER_USER" \
+            --set image.tag="$IMAGE_TAG" \
+            --set service.type=NodePort \
+            --set service.nodePort=30080 \
+            --wait \
+            --timeout=10m
+
+          echo "======================================"
+          echo "DEPLOYMENT COMPLETE"
+          echo "======================================"
+
+          REMOTE_SCRIPT
+
+      - name: Verify deployment
+        env:
+          SSH_HOST: ${{ steps.ec2.outputs.public_ip }}
+        run: |
+          set -e
+
+          ssh \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i /tmp/ec2_key.pem \
+            ubuntu@$SSH_HOST << 'EOF'
+
+          echo "======================================"
+          echo "PODS"
+          echo "======================================"
+
+          kubectl get pods -n rajesh -o wide
+
+          echo "======================================"
+          echo "SERVICES"
+          echo "======================================"
+
+          kubectl get svc -n rajesh
+
+          echo "======================================"
+          echo "DEPLOYMENTS"
+          echo "======================================"
+
+          kubectl get deployments -n rajesh
+
+          echo "======================================"
+          echo "MONGO"
+          echo "======================================"
+
+          kubectl get statefulsets -n rajesh
+
+          echo "======================================"
+          echo "HPA"
+          echo "======================================"
+
+          kubectl get hpa -n rajesh || true
+
+          echo "======================================"
+          echo "HELM"
+          echo "======================================"
+
+          helm list -n rajesh
+
+          echo "======================================"
+          echo "PORT MAPPING"
+          echo "======================================"
+
+          docker ps --format 'table {{.Names}}\t{{.Ports}}'
+
+          echo "======================================"
+          echo "LOCAL APPLICATION TEST"
+          echo "======================================"
+
+          curl --connect-timeout 10 --max-time 30 http://localhost:30080
+
+          echo
+          echo "APPLICATION TEST PASSED"
+
+          EOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: |
+          rm -f /tmp/ec2_key.pem
