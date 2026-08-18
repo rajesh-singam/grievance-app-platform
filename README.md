@@ -319,5 +319,3 @@ I welcome contributions! Here’s how:
 This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ---
-
-For a deep dive into every architectural decision, interview preparation, and production‑ready checklists, check out the [HLD_DESIGN_DOCUMENT.md](HLD_DESIGN_DOCUMENT.md).
