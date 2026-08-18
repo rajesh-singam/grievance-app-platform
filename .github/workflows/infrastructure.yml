@@ -1,0 +1,185 @@
+name: Infrastructure (Lint but no fail to find)
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/infrastructure.yml'
+      - 'terraform/**'
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '.github/workflows/infrastructure.yml'
+      - 'terraform/**'
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - master
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: ${{ vars.TF_VERSION || '1.5.0' }}
+  WORKING_DIR: ${{ vars.WORKING_DIR || './terraform/environments/prod' }}
+  TF_STATE_BUCKET: rajesh-grievanceapp-tfstate
+
+jobs:
+  check-ci:
+    name: Check CI status or direct push
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      should-proceed: ${{ steps.check.outputs.should-proceed }}
+    steps:
+      - name: Determine if we should proceed
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "should-proceed=true" >> $GITHUB_OUTPUT
+          else
+            echo "should-proceed=true" >> $GITHUB_OUTPUT
+          fi
+
+  lint:
+    name: Lint & Security Scan (non-blocking)
+    needs: check-ci
+    if: needs.check-ci.outputs.should-proceed == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Run TFLint
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          tflint --init
+          tflint --recursive || true
+
+      - name: Run Checkov (SARIF)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: ${{ env.WORKING_DIR }}
+          framework: terraform
+          output_format: sarif
+          output_file_path: ${{ env.WORKING_DIR }}/results.sarif
+          soft_fail: true
+
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles(format('{0}/results.sarif', env.WORKING_DIR)) != ''
+        with:
+          sarif_file: ${{ env.WORKING_DIR }}/results.sarif
+
+  terraform:
+    name: Terraform Apply
+    needs: [check-ci, lint]
+    if: needs.check-ci.outputs.should-proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Configure AWS credentials (using access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ------------------------------------------------
+     
+      # ------------------------------------------------
+      - name: Ensure EC2 key pair exists
+        run: |
+          KEY_NAME=$(grep '^key_name' ${{ env.WORKING_DIR }}/prod.tfvars | cut -d'"' -f2)
+          if aws ec2 describe-key-pairs --key-names "$KEY_NAME" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Key pair $KEY_NAME already exists — skipping creation."
+          else
+            echo "Creating key pair $KEY_NAME..."
+            aws ec2 create-key-pair --key-name "$KEY_NAME" --region ${{ env.AWS_REGION }} --query 'KeyMaterial' --output text > /tmp/$KEY_NAME.pem
+            echo "Key pair created. Private key saved to /tmp/$KEY_NAME.pem (download from workflow artifacts if needed)."
+          fi
+
+      # ------------------------------------------------
+      # Prerequisite: ensure the Terraform state bucket
+      # exists before `terraform init` runs. Idempotent —
+      # skips creation if the bucket is already there.
+      # ------------------------------------------------
+      - name: Ensure S3 backend bucket exists
+        run: |
+          if aws s3api head-bucket --bucket "${{ env.TF_STATE_BUCKET }}" 2>/dev/null; then
+            echo "Bucket ${{ env.TF_STATE_BUCKET }} already exists — skipping creation."
+          else
+            echo "Creating bucket ${{ env.TF_STATE_BUCKET }}..."
+            aws s3api create-bucket \
+              --bucket "${{ env.TF_STATE_BUCKET }}" \
+              --region "${{ env.AWS_REGION }}"
+
+            aws s3api put-bucket-versioning \
+              --bucket "${{ env.TF_STATE_BUCKET }}" \
+              --versioning-configuration Status=Enabled
+
+            aws s3api put-bucket-encryption \
+              --bucket "${{ env.TF_STATE_BUCKET }}" \
+              --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+            aws s3api put-public-access-block \
+              --bucket "${{ env.TF_STATE_BUCKET }}" \
+              --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          terraform init -input=false -reconfigure
+
+      - name: Terraform Validate
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          terraform plan -var-file=prod.tfvars -out=tfplan
+
+      - name: Terraform Apply
+        if: github.event_name != 'pull_request'
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          terraform apply -auto-approve tfplan
