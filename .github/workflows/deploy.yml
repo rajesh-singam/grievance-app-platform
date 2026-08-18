@@ -3,7 +3,7 @@ name: Deploy
 on:
   workflow_run:
     workflows:
-      - Infrastructure
+      - CI
     types:
       - completed
     branches:
@@ -22,6 +22,9 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  K8S_NAMESPACE: rajeshapp
+  KIND_CLUSTER: rajesh-kind
+  NODE_PORT: 30080
 
 jobs:
   deploy:
@@ -29,22 +32,52 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
 
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # ============================================================
+      # RESOLVE IMAGE TAG
+      # ============================================================
 
       - name: Resolve image tag
         id: resolve
+        shell: bash
         run: |
+          set -e
+
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "image_tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
           else
-            echo "image_tag=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
           fi
+
+          if [[ -z "$IMAGE_TAG" ]]; then
+            echo "ERROR: Image tag is empty"
+            exit 1
+          fi
+
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "IMAGE TAG"
+          echo "======================================"
+          echo "$IMAGE_TAG"
+
+      # ============================================================
+      # AWS
+      # ============================================================
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -52,6 +85,10 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # ============================================================
+      # FIND EC2
+      # ============================================================
 
       - name: Get EC2 public IP
         id: ec2
@@ -67,7 +104,7 @@ jobs:
             --output text)
 
           if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
-            echo "No running EC2 instance found"
+            echo "ERROR: No running EC2 instance found"
             exit 1
           fi
 
@@ -77,49 +114,59 @@ jobs:
             --output text)
 
           if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
-            echo "EC2 instance has no public IP"
+            echo "ERROR: EC2 instance has no public IP"
             exit 1
           fi
 
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "public_ip=$PUBLIC_IP" >> "$GITHUB_OUTPUT"
 
           echo "Instance: $INSTANCE_ID"
           echo "Public IP: $PUBLIC_IP"
 
+      # ============================================================
+      # SSH
+      # ============================================================
+
       - name: Setup SSH key
         run: |
           set -e
+
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > /tmp/ec2_key.pem
           chmod 600 /tmp/ec2_key.pem
 
+      # ============================================================
+      # PREPARE EC2
+      # ============================================================
+
       - name: Prepare EC2
         run: |
+          set -e
+
           ssh \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=30 \
             -i /tmp/ec2_key.pem \
             ubuntu@${{ steps.ec2.outputs.public_ip }} << 'EOF'
+
           set -e
 
-          echo "Preparing EC2"
+          echo "======================================"
+          echo "EC2 VALIDATION"
+          echo "======================================"
 
-          sudo mkdir -p /opt/rajesh-grievanceapp
-          sudo chown -R ubuntu:ubuntu /opt/rajesh-grievanceapp
-
-          echo "Docker:"
           docker --version
-
-          echo "Kind:"
           kind --version
-
-          echo "Kubectl:"
           kubectl version --client
-
-          echo "Helm:"
           helm version
 
           echo "EC2 ready"
+
           EOF
+
+      # ============================================================
+      # COPY HELM CHART
+      # ============================================================
 
       - name: Copy Helm chart
         run: |
@@ -130,14 +177,18 @@ jobs:
             -o ConnectTimeout=30 \
             -i /tmp/ec2_key.pem \
             -r ./helm/rajeshapp \
-            ubuntu@${{ steps.ec2.outputs.public_ip }}:/opt/rajesh-grievanceapp/
+            ubuntu@${{ steps.ec2.outputs.public_ip }}:/opt/
+
+      # ============================================================
+      # DEPLOY
+      # ============================================================
 
       - name: Deploy to EC2 Kind
         env:
           DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKER_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           SSH_HOST: ${{ steps.ec2.outputs.public_ip }}
-          DEPLOY_IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
         run: |
           set -e
 
@@ -146,80 +197,136 @@ jobs:
             -o ConnectTimeout=30 \
             -i /tmp/ec2_key.pem \
             ubuntu@$SSH_HOST \
-            "DOCKER_USER='$DOCKER_USER' DOCKER_TOKEN='$DOCKER_TOKEN' IMAGE_TAG='$DEPLOY_IMAGE_TAG' bash -s" << 'REMOTE_SCRIPT'
+            "DOCKER_USER='$DOCKER_USER' DOCKER_TOKEN='$DOCKER_TOKEN' IMAGE_TAG='$IMAGE_TAG' K8S_NAMESPACE='${K8S_NAMESPACE}' KIND_CLUSTER='${KIND_CLUSTER}' NODE_PORT='${NODE_PORT}' bash -s" << 'REMOTE_SCRIPT'
 
           set -e
 
           echo "======================================"
           echo "DEPLOYMENT"
           echo "======================================"
-          echo "Docker user: $DOCKER_USER"
-          echo "Image tag: $IMAGE_TAG"
 
-          if ! kind get clusters | grep -q "^rajesh-kind$"; then
-            echo "Creating Kind cluster"
+          echo "Docker user : $DOCKER_USER"
+          echo "Image tag   : $IMAGE_TAG"
+          echo "Namespace   : $K8S_NAMESPACE"
+          echo "Kind        : $KIND_CLUSTER"
+          echo "NodePort    : $NODE_PORT"
+
+          # ========================================================
+          # KIND CLUSTER
+          # ========================================================
+
+          if ! kind get clusters | grep -qx "$KIND_CLUSTER"; then
+
+            echo "Creating Kind cluster..."
 
             cat > /tmp/kind-config.yaml << 'KIND_CONFIG'
           kind: Cluster
           apiVersion: kind.x-k8s.io/v1alpha4
+
           nodes:
             - role: control-plane
               extraPortMappings:
                 - containerPort: 30080
                   hostPort: 30080
+                  listenAddress: "0.0.0.0"
                   protocol: TCP
           KIND_CONFIG
 
             kind create cluster \
-              --name rajesh-kind \
+              --name "$KIND_CLUSTER" \
               --config /tmp/kind-config.yaml
+
           else
+
             echo "Kind cluster already exists"
+
           fi
 
-          echo "======================================"
-          echo "KIND CLUSTER"
-          echo "======================================"
+          # ========================================================
+          # KUBECONFIG
+          # ========================================================
 
-          kind export kubeconfig --name rajesh-kind
-          kubectl config use-context kind-rajesh-kind
+          kind export kubeconfig \
+            --name "$KIND_CLUSTER"
+
+          kubectl config use-context "kind-$KIND_CLUSTER"
+
+          echo "======================================"
+          echo "KIND STATUS"
+          echo "======================================"
 
           kind get clusters
-          kubectl config current-context
           kubectl get nodes
+
+          # ========================================================
+          # VERIFY PORT MAPPING
+          # ========================================================
+
+          echo "======================================"
+          echo "PORT MAPPING"
+          echo "======================================"
+
+          docker port "$KIND_CLUSTER-control-plane"
+
+          if ! docker port "$KIND_CLUSTER-control-plane" | grep -q "0.0.0.0:30080"; then
+            echo "ERROR: Kind port 30080 is not mapped to EC2 port 30080"
+            exit 1
+          fi
+
+          echo "Port mapping verified"
+
+          # ========================================================
+          # DOCKER HUB LOGIN
+          # ========================================================
 
           echo "======================================"
           echo "DOCKER HUB LOGIN"
           echo "======================================"
 
           echo "$DOCKER_TOKEN" | docker login \
-            -u "$DOCKER_USER" \
+            --username "$DOCKER_USER" \
             --password-stdin
+
+          # ========================================================
+          # PULL + LOAD IMAGES
+          # ========================================================
 
           echo "======================================"
           echo "PULLING IMAGES"
           echo "======================================"
 
-          for svc in auth-service grievance-service audit-service frontend-service
+          for svc in \
+            auth-service \
+            grievance-service \
+            audit-service \
+            frontend-service
           do
-            echo "Pulling $svc"
 
-            docker pull "$DOCKER_USER/$svc:$IMAGE_TAG"
+            IMAGE="$DOCKER_USER/$svc:$IMAGE_TAG"
+
+            echo "Pulling $IMAGE"
+
+            docker pull "$IMAGE"
+
+            echo "Loading $IMAGE into Kind"
 
             kind load docker-image \
-              "$DOCKER_USER/$svc:$IMAGE_TAG" \
-              --name rajesh-kind
+              "$IMAGE" \
+              --name "$KIND_CLUSTER"
+
           done
+
+          # ========================================================
+          # HELM
+          # ========================================================
 
           echo "======================================"
           echo "HELM DEPLOYMENT"
           echo "======================================"
 
-          cd /opt/rajesh-grievanceapp
-
           helm upgrade --install rajeshapp \
-            ./rajeshapp \
-            --namespace rajesh \
+            /opt/rajeshapp \
+            --namespace "$K8S_NAMESPACE" \
             --create-namespace \
             --set image.registry="$DOCKER_USER" \
             --set image.tag="$IMAGE_TAG" \
@@ -234,6 +341,10 @@ jobs:
 
           REMOTE_SCRIPT
 
+      # ============================================================
+      # VERIFY
+      # ============================================================
+
       - name: Verify deployment
         env:
           SSH_HOST: ${{ steps.ec2.outputs.public_ip }}
@@ -246,58 +357,94 @@ jobs:
             -i /tmp/ec2_key.pem \
             ubuntu@$SSH_HOST << 'EOF'
 
+          set -e
+
+          NAMESPACE="rajeshapp"
+
           echo "======================================"
           echo "PODS"
           echo "======================================"
 
-          kubectl get pods -n rajesh -o wide
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide
 
           echo "======================================"
           echo "SERVICES"
           echo "======================================"
 
-          kubectl get svc -n rajesh
+          kubectl get svc \
+            -n "$NAMESPACE"
 
           echo "======================================"
           echo "DEPLOYMENTS"
           echo "======================================"
 
-          kubectl get deployments -n rajesh
+          kubectl get deployments \
+            -n "$NAMESPACE"
 
           echo "======================================"
-          echo "MONGO"
+          echo "STATEFULSETS"
           echo "======================================"
 
-          kubectl get statefulsets -n rajesh
+          kubectl get statefulsets \
+            -n "$NAMESPACE"
 
           echo "======================================"
           echo "HPA"
           echo "======================================"
 
-          kubectl get hpa -n rajesh || true
+          kubectl get hpa \
+            -n "$NAMESPACE" || true
 
           echo "======================================"
           echo "HELM"
           echo "======================================"
 
-          helm list -n rajesh
+          helm list \
+            -n "$NAMESPACE"
 
           echo "======================================"
-          echo "PORT MAPPING"
+          echo "DOCKER PORT MAPPING"
           echo "======================================"
 
-          docker ps --format 'table {{.Names}}\t{{.Ports}}'
+          docker ps \
+            --format 'table {{.Names}}\t{{.Ports}}'
 
           echo "======================================"
-          echo "LOCAL APPLICATION TEST"
+          echo "ENDPOINTS"
           echo "======================================"
 
-          curl --connect-timeout 10 --max-time 30 http://localhost:30080
+          kubectl get endpoints \
+            frontend-service \
+            -n "$NAMESPACE"
 
-          echo
+          echo "======================================"
+          echo "APPLICATION TEST"
+          echo "======================================"
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            http://localhost:30080)
+
+          echo "HTTP status: $HTTP_CODE"
+
+          if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "302" ]]; then
+            echo "ERROR: Application health test failed"
+            exit 1
+          fi
+
           echo "APPLICATION TEST PASSED"
 
           EOF
+
+      # ============================================================
+      # CLEANUP
+      # ============================================================
 
       - name: Cleanup SSH key
         if: always()
