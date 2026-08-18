@@ -1,17 +1,14 @@
 name: CI
 
 on:
-  push:
-    branches: [main, master]
-    paths-ignore:
-      - '.github/workflows/infrastructure.yml'
-      - 'terraform/**'
-
   pull_request:
     branches: [main, master]
     paths-ignore:
       - '.github/workflows/infrastructure.yml'
       - 'terraform/**'
+  concurrency:
+    group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true    
 
 permissions:
   contents: read

@@ -16,15 +16,7 @@ variable "key_name" {
 variable "instance_type" {
   description = "EC2 instance type. Restricted to the org's allowed list."
   type        = string
-  default     = "t3.small"
-
-  validation {
-    condition = contains([
-      "t2.nano", "t2.micro", "t2.small", "t2.medium",
-      "t3.nano", "t3.micro", "t3.small", "t3.medium"
-    ], var.instance_type)
-    error_message = "instance_type must be one of: t2.nano, t2.micro, t2.small, t2.medium, t3.nano, t3.micro, t3.small, t3.medium."
-  }
+  default     = "m7i-flex.large"
 }
 
 variable "ami_id" {
