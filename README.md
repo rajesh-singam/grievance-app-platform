@@ -1,7 +1,8 @@
+
 # Grievance Management System
 
-[![CI](https://github.com/rajesh-singam/grievance-app-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/rajesh-singam/grievance-app-platform/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![CI](https://github.com/shivscloud/rajesh-grivenceapp/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ---
 
@@ -318,7 +319,7 @@ All PRs must pass CI checks (lint, build, scan) before merging.
 
 ## License
 
-This project is licensed under the MIT License reachraj3.ind@gmail.com.
+This project is licensed under the MIT License reach me raj3.ind@gmail.com.
 
 ---
 
