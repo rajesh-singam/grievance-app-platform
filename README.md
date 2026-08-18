@@ -1,3 +1,4 @@
+
 # Grievance Management System
 
 ![CI](https://github.com/shivscloud/rajesh-grivenceapp/actions/workflows/ci.yml/badge.svg)
@@ -8,13 +9,13 @@
 ## Table of Contents
 
 - [Overview](#overview)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
+- [System Architecture](#system-architecture)
 - [Technology Stack](#technology-stack)
 - [Project Structure](#project-structure)
-- [API Documentation](#api-documentation)
-- [Deployment](#deployment)
-- [Security](#security)
+- [Quick Start](#quick-start)
+- [Deployment Strategy](#deployment-strategy)
+- [CI/CD Pipeline](#cicd-pipeline)
+- [Security Model](#security-model)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -22,63 +23,120 @@
 
 ## Overview
 
-This is a grievance management platform I built to practice microservices, Kubernetes, and real‑world deployment. It consists of four independent Flask services, each with its own MongoDB database, orchestrated in Kubernetes. The system handles user registration, JWT‑based authentication, grievance CRUD operations, and an audit trail.
+The **Grievance Management System** is a production‑ready microservices platform designed to handle user registration, authentication, grievance lifecycle management, and audit logging. It comprises four independently deployable Flask services, each backed by its own MongoDB database, orchestrated on Kubernetes.
 
-**What I wanted to achieve:**
+**Core capabilities:**
 
-- Understand service‑to‑service communication in a cluster
-- Implement stateless JWT authentication without a central session store
-- Use database‑per‑service to keep things loosely coupled
-- Deploy everything on Kubernetes with proper health checks, network policies, and horizontal scaling
+- User registration and secure login (JWT‑based)
+- Role‑based access control (RBAC)
+- Full CRUD operations for grievances
+- Status transition workflow (submitted → in review → resolved/rejected)
+- Append‑only audit trail for compliance
+- Health checks and readiness probes for Kubernetes
 
-The project is fully containerised, runs in a Kind cluster on EC2 for staging, and is ready for production migration to EKS.
+**Environment strategy:**
+
+- **Local development** – Docker Compose
+- **Staging** – Kind (Kubernetes in Docker) on EC2, mirroring production
+- **Production** – Amazon EKS with multi‑AZ, managed services, and enterprise security
+
+The system is built with a **Backend‑for‑Frontend (BFF)** pattern where only the frontend service is exposed externally; all internal services communicate via ClusterIP and require JWT validation.
 
 ---
 
-## Architecture
+## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                           BROWSER                               │
-└────────────────────────────────┬─────────────────────────────────┘
-                                 │ HTTP (NodePort 30080)
-                                 ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    FRONTEND-SERVICE (:5000)                      │
-│  • Renders HTML/CSS/JS                                          │
-│  • Manages user sessions                                        │
-│  • Aggregates calls to backend services                         │
-│  • ONLY external entrypoint (NodePort)                          │
-└────────────────────────────────┬─────────────────────────────────┘
-          │ JWT               │ JWT               │ JWT
-          ▼                    ▼                    ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│  auth-service   │  │grievance-service│  │  audit-service  │
-│    (:5001)      │  │    (:5002)      │  │    (:5003)      │
-│                 │  │                 │  │                 │
-│ • Register      │  │ • CRUD ops      │  │ • Append‑only   │
-│ • Login / JWT   │  │ • Status update │  │ • Action logs   │
-│ • auth_db       │  │ • grievance_db  │  │ • audit_db      │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
-                                 │
-                                 ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                 MONGODB STATEFULSET                              │
-│        ┌──────────┐  ┌──────────┐  ┌──────────┐               │
-│        │ auth_db  │  │grievance_db│  │ audit_db│               │
-│        └──────────┘  └──────────┘  └──────────┘               │
-└──────────────────────────────────────────────────────────────────┘
+                              ┌─────────────────┐
+                              │     Browser     │
+                              └────────┬────────┘
+                                       │ HTTP (NodePort 30080)
+                                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     FRONTEND-SERVICE (:5000)                    │
+│  • Serves HTML/CSS/JS (Jinja2 templates)                       │
+│  • Manages HTTP sessions and user context                      │
+│  • Aggregates backend calls                                    │
+│  • ONLY external entry point                                   │
+└─────────────────────────────────────────────────────────────────┘
+           │ JWT                │ JWT                │ JWT
+           ▼                    ▼                    ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│   auth-service   │  │grievance-service │  │  audit-service   │
+│      :5001       │  │      :5002       │  │      :5003       │
+│                  │  │                  │  │                  │
+│ • Registration   │  │ • CRUD           │  │ • Append‑only    │
+│ • Login / JWT    │  │ • Status mgmt    │  │ • Action logs    │
+│ • auth_db        │  │ • grievance_db   │  │ • audit_db       │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   MONGODB STATEFULSET                           │
+│           ┌───────────┐  ┌───────────┐  ┌───────────┐        │
+│           │  auth_db  │  │grievance_db│  │ audit_db  │        │
+│           └───────────┘  └───────────┘  └───────────┘        │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Why I Made These Choices
+### Design Rationale
 
-| Decision | Rationale |
-|----------|-----------|
-| **Stateless JWT** | No need to hit auth‑service on every request; each service validates the token locally using a shared `JWT_SECRET`. |
-| **Database per Service** | Loose coupling – I can scale or change one service without affecting the others. |
-| **Backend‑for‑Frontend (BFF)** | The frontend service is the only public entrypoint; it hides internal service topology and centralises session handling. |
-| **ClusterIP for Internal Services** | Only the frontend is exposed. The backend services (auth, grievance, audit) are internal‑only for security. |
-| **Async Audit Logging** | Audit calls are fire‑and‑forget with a short timeout – if audit fails, the main business operation still succeeds. |
+| Decision | Justification |
+|----------|---------------|
+| **Stateless JWT** | Each service validates tokens locally via shared `JWT_SECRET`; no per‑request network calls to auth‑service, reducing latency and eliminating a single point of failure. |
+| **Database per Service** | Ensures loose coupling, independent schema evolution, and isolated scaling. Each service owns its data store. |
+| **BFF Pattern** | Centralises session management and UI logic; hides internal microservice topology from clients. |
+| **ClusterIP for Backend** | Minimises attack surface – internal services are not reachable from outside the cluster. |
+| **Asynchronous Audit Logging** | Audit calls are fire‑and‑forget with a short timeout; audit failures do not block business operations, ensuring high availability. |
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|------------|
+| **Runtime** | Python 3.11 |
+| **Web Framework** | Flask |
+| **Database** | MongoDB 7.0 (StatefulSet) |
+| **Authentication** | PyJWT + bcrypt |
+| **Containerisation** | Docker (multi‑stage builds) |
+| **Orchestration** | Kubernetes (Deployments, StatefulSets, HPA, NetworkPolicies, Ingress) |
+| **CI/CD** | GitHub Actions (lint, build, vulnerability scan, deploy) |
+| **Security Scanning** | Trivy |
+| **Infrastructure as Code** | Terraform (EKS, VPC, IAM) |
+| **Package Management** | Helm (production charts) |
+
+---
+
+## Project Structure
+
+```
+grievance-app-platform/
+├── auth-service/               # Identity & access management
+│   ├── app.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── grievance-service/          # Core grievance operations
+│   ├── app.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── audit-service/              # Compliance audit trail (append‑only)
+│   ├── app.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── frontend-service/           # BFF / UI layer
+│   ├── app.py
+│   ├── Dockerfile
+│   ├── templates/
+│   └── static/
+    
+├── helm/rajeshapp/             # Production Helm chart
+├── .github/workflows/          # CI/CD pipelines
+├── terraform/                  # EKS & VPC provisioning
+├── docker-compose.yml          # Local development
+├── HLD_DESIGN_DOCUMENT.md
+└── README.md
+```
 
 ---
 
@@ -87,235 +145,181 @@ The project is fully containerised, runs in a Kind cluster on EC2 for staging, a
 ### Prerequisites
 
 - Docker & Docker Compose
-- Minikube (for Kubernetes deployment)
-- kubectl
+- Kubernetes cluster (Kind for staging, EKS for production)
+- `kubectl` and `helm`
 
 ### Local Development (Docker Compose)
 
 ```bash
-git clone https://github.com/shivscloud/rajesh-grivenceapp.git
-cd rajesh-grivenceapp
+git clone https://github.com/rajesh-singam/grievance-app-platform.git
+cd grievance-app-platform
 
 docker compose up --build
+# Access at http://localhost:5000
+# Register a user, create a grievance, and view audit logs
 
-# Open http://localhost:5000
-# Register a user, file a grievance, and see audit logs appear
-
-docker compose down -v   # Clean up volumes
+docker compose down -v   # Remove volumes
 ```
 
-### Kubernetes Deployment (Minikube)
+### Staging Deployment (Kind on EC2)
 
 ```bash
-minikube start
-eval $(minikube docker-env)   # Build images inside Minikube
+# On the staging EC2 instance (or local with Kind)
+kind create cluster --name staging
+eval $(kind get kubeconfig --name staging)
 
-chmod +x k8s/deploy-minikube.sh
-./k8s/deploy-minikube.sh      # One‑command deployment
+# Deploy using the helper script
+chmod +x k8s/deploy-kind.sh
+./k8s/deploy-kind.sh
 
-minikube service frontend-service -n grievance-system
+# Verify pods
+kubectl get pods -n grievance-system
+
+# Access the application (NodePort 30080)
+curl http://localhost:30080
 ```
 
-> If you prefer manual steps, check the script or the [HLD_DESIGN_DOCUMENT.md](HLD_DESIGN_DOCUMENT.md).
+### Production Deployment (EKS)
 
----
+The production deployment uses Terraform to provision the EKS cluster and Helm to install the application. Refer to [HLD_DESIGN_DOCUMENT.md](HLD_DESIGN_DOCUMENT.md) for the complete migration checklist.
 
-## Technology Stack
+```bash
+# Provision EKS (via Terraform)
+cd terraform
+terraform init && terraform apply -auto-approve
 
-| Layer | Tools |
-|-------|-------|
-| **Language** | Python 3.11 |
-| **Web Framework** | Flask |
-| **Database** | MongoDB 7 (StatefulSet) |
-| **Authentication** | PyJWT + bcrypt |
-| **Containerisation** | Docker (multi‑stage) |
-| **Orchestration** | Kubernetes (Deployments, StatefulSets, HPA, NetworkPolicies) |
-| **CI/CD** | GitHub Actions (lint, build, Trivy scan, deploy) |
-| **Security Scanning** | Trivy |
-| **Infrastructure** | Terraform (EKS, VPC, IAM) – optional |
+# Configure kubectl
+aws eks update-kubeconfig --region us-east-1 --name grievance-cluster
 
----
-
-## Project Structure
-
-```
-rajesh-grivenceapp/
-├── auth-service/              # Auth microservice
-│   ├── app.py                 # Registration, login, JWT issuance
-│   ├── Dockerfile
-│   └── requirements.txt
-├── grievance-service/         # Core business logic
-│   ├── app.py                 # CRUD, status workflow, audit integration
-│   ├── Dockerfile
-│   └── requirements.txt
-├── audit-service/             # Audit trail (append‑only)
-│   ├── app.py                 # Action logging
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend-service/          # BFF / UI layer
-│   ├── app.py                 # HTML rendering, session mgmt, aggregation
-│   ├── Dockerfile
-│   ├── templates/             # Jinja2 templates
-│   └── static/                # CSS/JS assets
-├── k8s/                       # Kubernetes manifests (numbered apply order)
-│   ├── 00-namespace.yaml
-│   ├── 01-configmap.yaml
-│   ├── 02-secret.yaml
-│   ├── 04-mongo-statefulset.yaml
-│   ├── 05-mongo-service.yaml
-│   ├── 06-13-*-deployment.yaml & *-service.yaml
-│   ├── 14-network-policies.yaml
-│   ├── 15-ingress.yaml
-│   ├── 16-hpa.yaml
-│   └── deploy-minikube.sh
-├── helm/rajeshapp/            # Helm chart for production
-├── .github/workflows/         # CI/CD pipelines
-├── docker-compose.yml
-├── HLD_DESIGN_DOCUMENT.md     # Full architecture guide
-└── README.md
+# Install the Helm chart
+helm upgrade --install grievance-app ./helm/rajeshapp \
+  --namespace grievance-system \
+  --set image.tag=v1.2.3 \
+  --set ingress.enabled=true \
+  --set ingress.host=grievance.example.com
 ```
 
 ---
 
-## API Documentation
 
-### Authentication
-
-```http
-POST /api/login
-Content-Type: application/json
-
-{
-  "username": "john_doe",
-  "password": "secret123"
-}
-
-Response:
-{
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "user": {
-    "id": "507f1f77bcf86cd799439011",
-    "username": "john_doe",
-    "role": "user"
-  }
-}
-```
-
-### Protected Endpoints
-
-All backend‑to‑backend calls require the `Authorization: Bearer <token>` header.
+### Protected Grievance Creation
 
 ```bash
 curl -X POST http://frontend-service:5000/api/grievances \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Workplace harassment",
-    "description": "Details...",
+    "title": "Workplace harassment complaint",
+    "description": "Detailed description...",
     "category": "hr",
     "priority": "high"
   }'
 ```
 
-### Health Checks
+### Health Endpoints (for Kubernetes)
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /healthz` | Liveness probe – restarts unhealthy pods |
-| `GET /readyz` | Readiness probe – stops traffic until ready |
+| Endpoint | Probe Type | Action |
+|----------|------------|--------|
+| `GET /healthz` | Liveness | Restart pod on failure |
+| `GET /readyz` | Readiness | Stop sending traffic until ready |
 
 ---
 
-## Deployment
+## Deployment Strategy
 
-### Environments
+The system supports multiple deployment environments with consistent configurations.
 
 | Environment | Platform | Purpose |
 |-------------|----------|---------|
-| **Local** | Docker Compose | Rapid development |
-| **Development** | Minikube | Kubernetes integration testing |
-| **Staging** | Kind on EC2 | Production‑like validation |
-| **Production** | EKS | Live traffic, multi‑AZ |
+| **Local** | Docker Compose | Development and unit testing |
+| **Staging** | Kind on EC2 | Integration and end‑to‑end validation; mirrors production Kubernetes |
+| **Production** | EKS (Amazon) | Live traffic, multi‑AZ, auto‑scaling, managed control plane |
 
-### CI/CD Pipeline
+**Key production‑grade features in the Helm chart:**
 
-```
-Push to main
-    │
-    ▼
-CI Workflow (GitHub Actions)
-    ├─ Discover services
-    ├─ Helm lint & template validation
-    ├─ Matrix build per service:
-    │   • Python lint (flake8)
-    │   • Docker build
-    │   • Trivy security scan (fails on CRITICAL findings)
-    │   • Push to Docker Hub (on push)
-    └─ Publish image tags
-    │
-    ▼
-Deploy Workflow (manual or on completion)
-    ├─ Find EC2 instance (tagged for staging)
-    ├─ SSH to EC2
-    ├─ Create Kind cluster if needed
-    ├─ Pull images from Docker Hub
-    ├─ `kind load docker-image` into cluster
-    ├─ `helm upgrade --install rajeshapp`
-    ├─ Verify pods, services, HPA, Helm release
-    └─ Test with `curl http://localhost:30080`
-```
-
-For production migration to EKS, refer to the [HLD_DESIGN_DOCUMENT.md](HLD_DESIGN_DOCUMENT.md) (includes ECR, ALB, DocumentDB, External Secrets, CloudWatch, etc.).
+- Horizontal Pod Autoscaler (HPA) based on CPU/memory
+- Network Policies (default‑deny, explicit allow)
+- Ingress with TLS termination (via AWS ALB or NGINX)
+- External Secrets Operator for AWS Secrets Manager integration
+- Persistent volumes for MongoDB (StatefulSet)
+- Readiness/liveness probes on all services
 
 ---
 
-## Security
+## CI/CD Pipeline
+
+All pipelines are implemented with GitHub Actions and triggered on pull requests and merges to `main`.
+
+```yaml
+# .github/workflows/ci.yml
+- Lint Python (flake8)
+- Build multi‑stage Docker images
+- Scan images with Trivy (fail on CRITICAL vulnerabilities)
+- Push images to Docker Hub (or Amazon ECR for production)
+- Generate image tags as artifacts
+```
+
+```yaml
+# .github/workflows/deploy.yml (manual or auto)
+- Locate EC2 staging instance (tagged)
+- SSH and create/update Kind cluster
+- Load images from Docker Hub into Kind
+- Run Helm upgrade with versioned tags
+- Verify rollout status and smoke‑test endpoints
+```
+
+For production, the deployment workflow extends to EKS using `kubectl` and Helm, with separate secrets and IAM roles.
+
+---
+
+## Security Model
 
 ### Authentication & Authorisation
 
-- **Stateless JWT** – signed with a shared secret, verified locally by each service.
-- **bcrypt** for password hashing.
-- **RBAC** – each JWT includes a `role` claim, used for service‑level authorisation.
-- **Token expiry** – configurable TTL to prevent indefinite reuse.
+- **JWT tokens** – signed with `JWT_SECRET`, validated locally by each service.
+- **Password hashing** – bcrypt with salt rounds.
+- **RBAC** – role claims (`user`, `admin`, `reviewer`) enforced at service level.
+- **Token expiry** – configurable TTL (default 24 hours).
 
 ### Network Security
 
-- **Default Deny** – NetworkPolicies block all ingress/egress by default.
-- **Explicit Allow** – only required service‑to‑service communication is permitted.
-- **ClusterIP Isolation** – backend services are not reachable from outside the cluster.
+- **NetworkPolicies** – default deny all ingress/egress; only explicitly allowed traffic (e.g., frontend → grievance, frontend → auth, etc.).
+- **ClusterIP services** – no external exposure for auth, grievance, or audit.
+- **TLS termination** – at the ingress layer (ALB or NGINX) for production.
 
 ### Container Security
 
 - **Non‑root user** – all containers run as `appuser`.
-- **Multi‑stage builds** – production images contain only runtime dependencies, no build tools.
-- **Vulnerability scanning** – Trivy blocks any CRITICAL CVEs in CI.
+- **Multi‑stage builds** – production images exclude build‑time dependencies.
+- **Trivy scanning** – blocks CRITICAL and HIGH severity CVEs during CI.
 
 ### Secrets Management
 
 | Environment | Approach |
 |-------------|----------|
-| **Development** | Kubernetes Secrets with placeholder values (committed). |
-| **Production** | External Secrets Operator + AWS Secrets Manager (encrypted, audited). |
+| **Development** | Kubernetes Secrets with base64‑encoded placeholders (committed for convenience) |
+| **Staging** | Kubernetes Secrets injected via Helm values (external to repo) |
+| **Production** | External Secrets Operator + AWS Secrets Manager (encrypted, audited, rotation) |
 
 ---
 
 ## Contributing
 
-I welcome contributions! Here’s how:
+We follow a standard GitHub flow. To contribute:
 
 1. Fork the repository.
 2. Create a feature branch: `git checkout -b feature/your-feature`.
-3. Make your changes and ensure the linter passes: `flake8 . --max-line-length=120`.
-4. Commit with a clear message: `git commit -m "feat: add your feature"`.
-5. Push: `git push origin feature/your-feature`.
-6. Open a Pull Request.
+3. Write code and ensure linting passes: `flake8 . --max-line-length=120`.
+4. Write clear commit messages (conventional commits preferred).
+5. Push to your fork and open a pull request against `main`.
 
-**Code style:** PEP 8 (enforced in CI), max line length 120, type hints recommended, docstrings for public functions.
+All PRs must pass CI checks (lint, build, scan) before merging.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License reach me raj3.ind@gmail.com.
 
 ---
+
